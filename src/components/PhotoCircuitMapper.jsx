@@ -124,7 +124,6 @@ export default function PhotoCircuitMapper({ onComplete = null }) {
         setImagePreview(dataUrl);
         setAcceptedCircuitImage(dataUrl);
         setUploadedImage(dataUrl);
-        setValidationResult(null);
         setDetectionConfidenceError(null);
         setPipelineResult(null);
         setErrorMessage(null);
@@ -189,7 +188,6 @@ export default function PhotoCircuitMapper({ onComplete = null }) {
     setImagePreview(dataUrl);
     setAcceptedCircuitImage(dataUrl);
     setUploadedImage(dataUrl);
-    setValidationResult(null);
     setDetectionConfidenceError(null);
     setPipelineResult(null);
     setErrorMessage(null);

@@ -109,7 +109,7 @@ export function validateSupply(circuitState, positiveNode, groundNode, voltage) 
       valid: false,
       status: SUPPLY_STATUS.BLOCKED,
       reason: REASON_CODES.AMBIGUOUS_CIRCUIT,
-      message: 'Circuit connections not verified. Reconstruct or retake photo before configuring power.'
+      message: 'Circuit connections not verified. Reconstruct or re-upload photo before configuring power.'
     };
   }
 

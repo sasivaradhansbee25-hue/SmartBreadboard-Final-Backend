@@ -198,18 +198,37 @@ def detect_components_endpoint(req: ImageAnalysisRequest):
 # 1. POST /api/analyze-image (End-to-End Real AI Circuit Analysis Pipeline)
 @app.post("/api/analyze-image")
 async def analyze_image_endpoint(
-    file: Optional[UploadFile] = File(None),
-    req: Optional[ImageAnalysisRequest] = None
+    request: Request,
+    file: Optional[UploadFile] = File(None)
 ):
     import base64
     image_bytes = None
     if file:
         image_bytes = await file.read()
-    elif req and req.image_base64:
-        b64_str = req.image_base64
-        if ',' in b64_str:
-            b64_str = b64_str.split(',')[1]
-        image_bytes = base64.b64decode(b64_str)
+    
+    if not image_bytes:
+        try:
+            body_json = await request.json()
+            b64_str = body_json.get("image_base64") or body_json.get("image") or body_json.get("imageData")
+            if b64_str:
+                if ',' in b64_str:
+                    b64_str = b64_str.split(',')[1]
+                image_bytes = base64.b64decode(b64_str)
+        except Exception:
+            pass
+
+    if not image_bytes:
+        try:
+            form_data = await request.form()
+            b64_str = form_data.get("image_base64") or form_data.get("image")
+            if b64_str and isinstance(b64_str, str):
+                if ',' in b64_str:
+                    b64_str = b64_str.split(',')[1]
+                image_bytes = base64.b64decode(b64_str)
+            elif "file" in form_data and hasattr(form_data["file"], "read"):
+                image_bytes = await form_data["file"].read()
+        except Exception:
+            pass
 
     if not image_bytes:
         raise HTTPException(status_code=400, detail="Missing image file upload or image_base64 field.")

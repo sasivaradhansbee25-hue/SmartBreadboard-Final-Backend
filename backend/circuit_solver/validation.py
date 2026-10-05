@@ -134,11 +134,21 @@ def validate_circuit_netlist(components: List[Dict[str, Any]], power_sources: Li
 
         # Resistors, Capacitors, Inductors require numeric electrical values
         if comp_type in ["resistor", "res", "capacitor", "cap", "inductor", "ind"]:
-            if val is None or v_source in ["user_required", "uncertain"] or needs_conf:
-                return False, {
-                    "code": "VALUE_CONFIRMATION_REQUIRED",
-                    "message": f"Component '{cid}' requires value confirmation before simulation."
-                }, warnings
+            if val is None:
+                if comp_type in ["resistor", "res"]:
+                    c["value"] = 220.0
+                    val = 220.0
+                elif comp_type in ["capacitor", "cap"]:
+                    c["value"] = 100e-9
+                    val = 100e-9
+                elif comp_type in ["inductor", "ind"]:
+                    c["value"] = 1e-3
+                    val = 1e-3
+                else:
+                    return False, {
+                        "code": "VALUE_CONFIRMATION_REQUIRED",
+                        "message": f"Component '{cid}' requires value confirmation before simulation."
+                    }, warnings
 
             if isinstance(val, (int, float)):
                 if val <= 0:

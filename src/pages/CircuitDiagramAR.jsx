@@ -49,6 +49,7 @@ import {
 } from 'lucide-react';
 import { useCircuit } from '../context/CircuitContext';
 import RealCameraARCanvas from '../components/RealCameraARCanvas';
+import Breadboard3DCanvas from '../components/Breadboard3DCanvas';
 import { apiRequest, WS_BASE_URL } from '../services/api';
 import {
   calculateTrainerVirtualCurrent,
@@ -63,7 +64,8 @@ export default function CircuitDiagramAR() {
     activeCircuit,
     uploadedImage,
     hardwareTelemetry,
-    setHardwareTelemetry
+    setHardwareTelemetry,
+    simulationResult: contextSimulationResult
   } = useCircuit();
 
   // AR View Mode: 'camera' (Live Camera Feed) | 'image' (Uploaded Photo Reference)
@@ -322,31 +324,38 @@ export default function CircuitDiagramAR() {
     simulated_rpm: sw2On ? 2850 : 0
   }), [sw2On, virtualM2Current]);
 
-  // Synthetic simulation result passed down to 3D renderer
-  const simulationResult = useMemo(() => ({
-    status: 'SOLVED',
-    solver_status: 'SOLVED',
-    circuit_signature: `TRAINER_SIG_SW1:${sw1State}_SW2:${sw2State}`,
-    power_analysis: {
-      voltage_rms: 9.0,
-      current_rms: virtualTotalCurrent * 1e-3,
-      real_power_w: 9.0 * virtualTotalCurrent * 1e-3,
-      power_factor: 1.0,
-      frequency_hz: 0
-    },
-    motor: motor1State,
-    component_voltages: {
-      '7805': { voltage_rms: 5.0 },
-      'C1': { voltage_rms: 5.0 },
-      'R1': { voltage_rms: 5.0 },
-      'M1': { voltage_rms: sw1On ? 5.0 : 0.0 },
-      'M2': { voltage_rms: sw2On ? 5.0 : 0.0 }
-    },
-    component_currents: {
-      'M1': { current_rms: virtualM1Current * 1e-3 },
-      'M2': { current_rms: virtualM2Current * 1e-3 }
+  const isScannedCircuit = activeCircuit?.source === 'real' || (activeCircuit?.components && activeCircuit.components.length > 0 && activeCircuit.id !== 'circ_trainer_dual_motor');
+
+  // Synthetic or real MNA simulation result passed down to 3D renderer
+  const simulationResult = useMemo(() => {
+    if (isScannedCircuit && contextSimulationResult) {
+      return contextSimulationResult;
     }
-  }), [sw1State, sw2State, sw1On, sw2On, virtualTotalCurrent, virtualM1Current, virtualM2Current, motor1State]);
+    return {
+      status: 'SOLVED',
+      solver_status: 'SOLVED',
+      circuit_signature: `TRAINER_SIG_SW1:${sw1State}_SW2:${sw2State}`,
+      power_analysis: {
+        voltage_rms: 9.0,
+        current_rms: virtualTotalCurrent * 1e-3,
+        real_power_w: 9.0 * virtualTotalCurrent * 1e-3,
+        power_factor: 1.0,
+        frequency_hz: 0
+      },
+      motor: motor1State,
+      component_voltages: {
+        '7805': { voltage_rms: 5.0 },
+        'C1': { voltage_rms: 5.0 },
+        'R1': { voltage_rms: 5.0 },
+        'M1': { voltage_rms: sw1On ? 5.0 : 0.0 },
+        'M2': { voltage_rms: sw2On ? 5.0 : 0.0 }
+      },
+      component_currents: {
+        'M1': { current_rms: virtualM1Current * 1e-3 },
+        'M2': { current_rms: virtualM2Current * 1e-3 }
+      }
+    };
+  }, [isScannedCircuit, contextSimulationResult, sw1State, sw2State, sw1On, sw2On, virtualTotalCurrent, virtualM1Current, virtualM2Current, motor1State]);
 
   const handleToggleSW1 = () => {
     setSw1State(prev => (prev === 'ON' ? 'OFF' : 'ON'));
@@ -509,67 +518,76 @@ export default function CircuitDiagramAR() {
             overflow: 'hidden',
             boxShadow: '0 8px 30px rgba(0, 0, 0, 0.5)'
           }}>
-            {/* BACKGROUND: Uploaded Circuit Photo or Camera Feed */}
-            {arMode === 'image' ? (
-              <img
-                ref={imageRef}
-                src={analyzedCircuit.image_url || uploadedImage || '/circuits/circuit_1_real_photo.jpg'}
-                alt="Uploaded Circuit AR Reference"
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  width: '100%',
-                  height: '100%',
-                  objectFit: 'contain',
-                  display: 'block',
-                  userSelect: 'none',
-                  pointerEvents: 'none',
-                  zIndex: 1
-                }}
-              />
-            ) : (
-              <video
-                ref={videoRef}
-                autoPlay
-                playsInline
-                muted
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  width: '100%',
-                  height: '100%',
-                  objectFit: 'contain',
-                  display: 'block',
-                  zIndex: 1
-                }}
-              />
-            )}
-
-            {/* TRANSPARENT AR OVERLAY: Realistic 3D Components */}
-            {isArActive && (
+            {/* VIEW CONTENTS: 3D Canvas OR AR Background + Overlay */}
+            {arMode === '3d' ? (
               <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 10 }}>
-                <RealCameraARCanvas
-                  videoRef={videoRef}
-                  imageRef={imageRef}
-                  arMode={arMode}
-                  mediaWidth={analyzedCircuit.imageMetadata?.width || 1280}
-                  mediaHeight={analyzedCircuit.imageMetadata?.height || 720}
-                  detectedComponents={analyzedCircuit.components || []}
-                  detectedWires={analyzedCircuit.wires || []}
-                  simulationResult={simulationResult}
-                  isPaused={!isArActive}
-                  isStale={false}
-                  onResetRegistration={handleResetRegistration}
-                  selectedComponentId={selectedCompId}
-                  onSelectComponent={(cId) => setSelectedCompId(cId)}
-                  switchState={sw1State}
-                  sw1State={sw1State}
-                  sw2State={sw2State}
-                  motorStates={{ M1: motor1State, M2: motor2State }}
-                />
+                <Breadboard3DCanvas circuit={analyzedCircuit} />
               </div>
+            ) : (
+              <>
+                {/* BACKGROUND: Uploaded Circuit Photo or Camera Feed */}
+                {arMode === 'image' ? (
+                  <img
+                    ref={imageRef}
+                    src={analyzedCircuit.image_url || uploadedImage || '/circuits/circuit_1_real_photo.jpg'}
+                    alt="Uploaded Circuit AR Reference"
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      width: '100%',
+                      height: '100%',
+                      objectFit: 'contain',
+                      display: 'block',
+                      userSelect: 'none',
+                      pointerEvents: 'none',
+                      zIndex: 1
+                    }}
+                  />
+                ) : (
+                  <video
+                    ref={videoRef}
+                    autoPlay
+                    playsInline
+                    muted
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      width: '100%',
+                      height: '100%',
+                      objectFit: 'contain',
+                      display: 'block',
+                      zIndex: 1
+                    }}
+                  />
+                )}
+
+                {/* TRANSPARENT AR OVERLAY: Realistic 3D Components */}
+                {isArActive && (
+                  <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 10 }}>
+                    <RealCameraARCanvas
+                      videoRef={videoRef}
+                      imageRef={imageRef}
+                      arMode={arMode}
+                      mediaWidth={analyzedCircuit.imageMetadata?.width || 1280}
+                      mediaHeight={analyzedCircuit.imageMetadata?.height || 720}
+                      detectedComponents={analyzedCircuit.components || []}
+                      detectedWires={analyzedCircuit.wires || []}
+                      simulationResult={simulationResult}
+                      isPaused={!isArActive}
+                      isStale={false}
+                      onResetRegistration={handleResetRegistration}
+                      selectedComponentId={selectedCompId}
+                      onSelectComponent={(cId) => setSelectedCompId(cId)}
+                      switchState={sw1State}
+                      sw1State={sw1State}
+                      sw2State={sw2State}
+                      motorStates={{ M1: motor1State, M2: motor2State }}
+                    />
+                  </div>
+                )}
+              </>
             )}
 
             {/* Overlay Top Bar: Mode Switcher */}
@@ -586,6 +604,25 @@ export default function CircuitDiagramAR() {
               backdropFilter: 'blur(8px)',
               zIndex: 30
             }}>
+              <button
+                onClick={() => setArMode('3d')}
+                style={{
+                  padding: '0.35rem 0.75rem',
+                  borderRadius: '6px',
+                  fontSize: '0.76rem',
+                  fontWeight: 800,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.35rem',
+                  background: arMode === '3d' ? '#0284c7' : 'transparent',
+                  color: arMode === '3d' ? '#ffffff' : '#94a3b8',
+                  border: 'none',
+                  cursor: 'pointer'
+                }}
+              >
+                <Layers size={14} />
+                3D TWIN
+              </button>
               <button
                 onClick={() => setArMode('camera')}
                 style={{
