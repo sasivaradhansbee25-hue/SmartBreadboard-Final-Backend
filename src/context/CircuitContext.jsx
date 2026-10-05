@@ -57,6 +57,10 @@ export function CircuitProvider({ children }) {
   });
   const [simulationStatus, setSimulationStatus] = useState('READY');
   const [simulationError, setSimulationError] = useState(null);
+  const [simulationSignature, setSimulationSignature] = useState(null);
+  const [currentTimeIndex, setCurrentTimeIndex] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
   // ESP32 Real-Time Hardware Telemetry State
   const [hardwareTelemetry, setHardwareTelemetry] = useState({
     status: 'DISCONNECTED', // 'CONNECTING' | 'CONNECTED' | 'DISCONNECTED' | 'ERROR'
