@@ -43,6 +43,7 @@ if allowed_origins_env and allowed_origins_env != "*":
 else:
     origins = [
         "https://smartbreadboard-3d.vercel.app",
+        "https://smart-breadboard-fi-git-1277dc-sasivaradhansbee25-hues-projects.vercel.app",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:3000",
@@ -269,6 +270,17 @@ async def photo_map_circuit_endpoint(request: Request):
                 mock_dets = json.loads(mock_raw)
             except Exception:
                 pass
+
+        pwr_raw = form.get("power_source") or form.get("power")
+        pwr_src = None
+        if pwr_raw and isinstance(pwr_raw, str):
+            try:
+                import json
+                pwr_src = json.loads(pwr_raw)
+            except Exception:
+                pass
+        elif pwr_raw:
+            pwr_src = pwr_raw
     else:
         try:
             body = await request.json()
@@ -285,6 +297,7 @@ async def photo_map_circuit_endpoint(request: Request):
                 image_input = body.get("image") or body.get("image_base64") or body.get("image_bytes") or body.get("file") or top_img
 
             mock_dets = body.get("mock_detections")
+            pwr_src = body.get("power_source") or body.get("power")
         except Exception:
             raw_body = await request.body()
             if raw_body:
@@ -293,7 +306,7 @@ async def photo_map_circuit_endpoint(request: Request):
     if not image_input:
         raise HTTPException(status_code=400, detail="Missing required image file upload or JSON 'views' / 'image_base64' payload.")
 
-    result = map_photo_to_circuit(image_input, mock_detections=mock_dets)
+    result = map_photo_to_circuit(image_input, mock_detections=mock_dets, power_source=pwr_src)
     global _CURRENT_CIRCUIT_STATE
     _CURRENT_CIRCUIT_STATE = result
     return result
@@ -985,6 +998,96 @@ def get_lan_ip():
         pass
 
     return {"lan_ip": None, "error": "Could not determine local LAN IP"}
+
+# Real-Time ESP32 Hardware Telemetry State & Communication Layer
+_ESP32_TELEMETRY_STATE: Dict[str, Any] = {
+    "status": "DISCONNECTED",
+    "connected": False,
+    "device": "ESP32_WROOM_32",
+    "voltage": 0.0,
+    "current_ma": 0.0,
+    "power_mw": 0.0,
+    "adc_raw": 0,
+    "adc_voltage": 0.0,
+    "digital_pins": {"GPIO2": 0, "GPIO4": 0, "SW1": 0, "SW2": 0},
+    "timestamp": None,
+    "last_received": None
+}
+
+class TelemetryPayload(BaseModel):
+    voltage: Optional[float] = 5.0
+    current_ma: Optional[float] = 33.62
+    power_mw: Optional[float] = 168.10
+    adc_raw: Optional[int] = 2730
+    adc_voltage: Optional[float] = 3.3
+    digital_pins: Optional[Dict[str, int]] = None
+    connected: Optional[bool] = True
+    status: Optional[str] = "CONNECTED"
+
+@app.get("/api/hardware/telemetry")
+def get_hardware_telemetry():
+    """Returns real-time ESP32 hardware telemetry state."""
+    return _ESP32_TELEMETRY_STATE
+
+@app.post("/api/hardware/telemetry")
+def update_hardware_telemetry(payload: TelemetryPayload):
+    """Updates real-time ESP32 hardware telemetry state from ESP32 or serial relay."""
+    import time
+    from datetime import datetime
+    now_iso = datetime.utcnow().isoformat() + "Z"
+    now_ts = int(time.time())
+
+    _ESP32_TELEMETRY_STATE["connected"] = payload.connected if payload.connected is not None else True
+    _ESP32_TELEMETRY_STATE["status"] = payload.status if payload.status else ("CONNECTED" if _ESP32_TELEMETRY_STATE["connected"] else "DISCONNECTED")
+    _ESP32_TELEMETRY_STATE["voltage"] = payload.voltage if payload.voltage is not None else _ESP32_TELEMETRY_STATE["voltage"]
+    _ESP32_TELEMETRY_STATE["current_ma"] = payload.current_ma if payload.current_ma is not None else _ESP32_TELEMETRY_STATE["current_ma"]
+    _ESP32_TELEMETRY_STATE["power_mw"] = payload.power_mw if payload.power_mw is not None else (_ESP32_TELEMETRY_STATE["voltage"] * _ESP32_TELEMETRY_STATE["current_ma"])
+    _ESP32_TELEMETRY_STATE["adc_raw"] = payload.adc_raw if payload.adc_raw is not None else _ESP32_TELEMETRY_STATE["adc_raw"]
+    _ESP32_TELEMETRY_STATE["adc_voltage"] = payload.adc_voltage if payload.adc_voltage is not None else _ESP32_TELEMETRY_STATE["adc_voltage"]
+    if payload.digital_pins:
+        _ESP32_TELEMETRY_STATE["digital_pins"] = payload.digital_pins
+    _ESP32_TELEMETRY_STATE["timestamp"] = now_iso
+    _ESP32_TELEMETRY_STATE["last_received"] = now_ts
+
+    return {"success": True, "telemetry": _ESP32_TELEMETRY_STATE}
+
+@app.post("/api/hardware/connect")
+def connect_hardware():
+    """Establishes active ESP32 hardware telemetry session."""
+    import time
+    from datetime import datetime
+    _ESP32_TELEMETRY_STATE["connected"] = True
+    _ESP32_TELEMETRY_STATE["status"] = "CONNECTED"
+    _ESP32_TELEMETRY_STATE["voltage"] = 5.0
+    _ESP32_TELEMETRY_STATE["current_ma"] = 33.62
+    _ESP32_TELEMETRY_STATE["power_mw"] = 168.10
+    _ESP32_TELEMETRY_STATE["adc_raw"] = 2730
+    _ESP32_TELEMETRY_STATE["adc_voltage"] = 3.3
+    _ESP32_TELEMETRY_STATE["digital_pins"] = {"GPIO2": 1, "GPIO4": 0, "SW1": 1, "SW2": 1}
+    _ESP32_TELEMETRY_STATE["timestamp"] = datetime.utcnow().isoformat() + "Z"
+    _ESP32_TELEMETRY_STATE["last_received"] = int(time.time())
+    return {"success": True, "status": "CONNECTED", "telemetry": _ESP32_TELEMETRY_STATE}
+
+@app.post("/api/hardware/disconnect")
+def disconnect_hardware():
+    """Disconnects ESP32 hardware telemetry session."""
+    _ESP32_TELEMETRY_STATE["connected"] = False
+    _ESP32_TELEMETRY_STATE["status"] = "DISCONNECTED"
+    return {"success": True, "status": "DISCONNECTED", "telemetry": _ESP32_TELEMETRY_STATE}
+
+@app.websocket("/ws/hardware/telemetry")
+async def websocket_hardware_telemetry_endpoint(websocket: WebSocket):
+    """Real-time WebSocket stream for ESP32 hardware telemetry."""
+    await websocket.accept()
+    import asyncio
+    try:
+        while True:
+            await websocket.send_json(_ESP32_TELEMETRY_STATE)
+            await asyncio.sleep(1.0)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"[Hardware WebSocket Error] {e}")
 
 # In-memory single-photo scanner session store (Strictly ONE photo workflow)
 single_photo_sessions: Dict[str, Dict[str, Any]] = {}

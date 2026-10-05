@@ -60,9 +60,14 @@ SUPPORTED_COMPONENTS = {
     "cap": "capacitor",
     "inductor": "inductor",
     "ind": "inductor",
+    "ic": "ic_chip",
+    "ic_chip": "ic_chip",
+    "chip": "ic_chip",
+    "integrated_circuit": "ic_chip",
     "wire": "wire",
     "jumper": "wire",
-    "jumper_wire": "wire"
+    "jumper_wire": "wire",
+    "connection": "wire"
 }
 
 
@@ -329,7 +334,8 @@ def compute_deterministic_circuit_signature(
 def map_photo_to_circuit(
     image_input: Union[bytes, str, np.ndarray, Dict[str, Any]],
     mock_detections: Optional[List[Dict[str, Any]]] = None,
-    conf_threshold: float = 0.40
+    conf_threshold: float = 0.40,
+    power_source: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None
 ) -> Dict[str, Any]:
     """
     High-level Photo to Verified Circuit Mapping Pipeline (Phase 24.1).
@@ -382,6 +388,7 @@ def map_photo_to_circuit(
     if std_dev < 3.0 and not mock_detections:
         return {
             "status": "BLOCKED",
+            "status_message": "Image quality is insufficient for reliable analysis.",
             "components": [],
             "connections": [],
             "nodes": [],
@@ -427,6 +434,7 @@ def map_photo_to_circuit(
         diagnostics.append("No circuit components detected on breadboard.")
         return {
             "status": "BLOCKED",
+            "status_message": "No reliable electronic circuit components detected.",
             "components": [],
             "connections": [],
             "nodes": [],
@@ -652,32 +660,38 @@ def map_photo_to_circuit(
         })
 
     # 5. Determine Pipeline Status & Simulation Readiness
-    # States: READY, PARTIAL, AMBIGUOUS, BLOCKED, UNVERIFIED
+    # States: READY, PARTIAL, AMBIGUOUS, BLOCKED, UNVERIFIED, POOR_QUALITY, NO_COMPONENTS_DETECTED
     has_unverified_components = any(c.get("status") == "UNVERIFIED" for c in processed_components)
 
     if has_ambiguous_terminals:
         pipeline_status = "AMBIGUOUS"
+        status_msg = "Partial analysis completed — some components could not be identified reliably."
         sim_ready = False
         sim_reason = "AMBIGUOUS_TERMINAL_MAPPING"
     elif has_unknown_components:
         pipeline_status = "PARTIAL"
+        status_msg = "Partial analysis completed — some components could not be identified reliably."
         sim_ready = False
         sim_reason = "UNSUPPORTED_OR_UNKNOWN_COMPONENTS"
     elif has_unverified_components:
-        pipeline_status = "UNVERIFIED"
+        pipeline_status = "PARTIAL"
+        status_msg = "Partial analysis completed — some components could not be identified reliably."
         sim_ready = False
         sim_reason = "CIRCUIT_CONNECTIONS_NOT_VERIFIED"
     elif has_verified_components and all(c["status"] == "VERIFIED" for c in processed_components):
         pipeline_status = "READY"
+        status_msg = "Analysis complete"
         # Simulation is gated until manual power supply configuration (Phase 24.2)
         sim_ready = False
         sim_reason = "SUPPLY_CONFIGURATION_REQUIRED"
     elif has_verified_components:
         pipeline_status = "PARTIAL"
+        status_msg = "Partial analysis completed — some components could not be identified reliably."
         sim_ready = False
         sim_reason = "PARTIAL_CIRCUIT_MAPPED"
     else:
         pipeline_status = "BLOCKED"
+        status_msg = "No reliable electronic circuit components detected."
         sim_ready = False
         sim_reason = "NO_COMPONENTS_VERIFIED"
 
@@ -694,6 +708,7 @@ def map_photo_to_circuit(
         "source": "real",
         "metadata": {
             "status": pipeline_status,
+            "status_message": status_msg,
             "signature": circuit_sig,
             "created_at": ""
         },
@@ -704,8 +719,31 @@ def map_photo_to_circuit(
         "topology_verified": (pipeline_status == "READY")
     }
 
-    return {
+    # Check if power_source is provided or if netlist contains power source / DC supply
+    if power_source:
+        netlist_obj["power_sources"] = [power_source] if isinstance(power_source, dict) else power_source
+
+    electrical_analysis = None
+    digital_twin = None
+    if netlist_obj.get("power_sources") or power_source or (pipeline_status == "READY" and any("VCC" in n["node_id"] or "POWER" in n["node_id"] for n in nodes_list)):
+        try:
+            from circuit_solver.dc_solver import run_dc_analysis, format_solver_result
+            from core.digital_twin import build_digital_twin_payload
+            solver_res = run_dc_analysis(netlist_obj)
+            electrical_analysis = format_solver_result(solver_res, netlist_obj)
+            digital_twin = electrical_analysis.get("digital_twin") or build_digital_twin_payload(netlist_obj, solver_status="SUCCESS")
+            sim_ready = True
+            sim_reason = "SIMULATION_COMPLETED"
+        except Exception as e:
+            diagnostics.append(f"Simulation execution warning: {str(e)}")
+            sim_ready = False
+            sim_reason = "SIMULATION_ERROR"
+    elif pipeline_status in ["READY", "PARTIAL"]:
+        diagnostics.append("Power supply configuration required: Please specify positive supply (+V) and ground (GND) nodes to run DC simulation.")
+
+    result_payload = {
         "status": pipeline_status,
+        "status_message": status_msg,
         "components": processed_components,
         "connections": connections,
         "nodes": nodes_list,
@@ -716,3 +754,11 @@ def map_photo_to_circuit(
         "simulation_ready": sim_ready,
         "simulation_readiness_reason": sim_reason
     }
+
+    if electrical_analysis is not None:
+        result_payload["electrical_analysis"] = electrical_analysis
+        result_payload["simulationResult"] = electrical_analysis
+    if digital_twin is not None:
+        result_payload["digital_twin"] = digital_twin
+
+    return result_payload

@@ -110,12 +110,12 @@ def nms_bounding_boxes(boxes: list, scores: list, iou_threshold: float = 0.45) -
 
     return keep
 
-def detect_components_yolo(image_input: bytes | str, conf_threshold: float = 0.45) -> dict:
+def detect_components_yolo(image_input: bytes | str | np.ndarray, conf_threshold: float = 0.30) -> dict:
     """
     Main entry point for Phase 10 YOLO Component Detection.
-    Executes neural network tensor inference on Phase 9 normalized image matrices.
-    Returns real bounding boxes, class labels, confidence scores, and crop regions.
-    No hardcoded fallbacks or mock data.
+    Executes robust multi-pass neural network inference (Normal -> CLAHE Enhanced -> Perspective Warp),
+    auto-downscales large images preserving aspect ratio, deduplicates overlapping predictions via NMS,
+    and assigns confidence categories (CONFIRMED, PROBABLE, UNCERTAIN).
     """
     try:
         if isinstance(image_input, np.ndarray):
@@ -141,68 +141,104 @@ def detect_components_yolo(image_input: bytes | str, conf_threshold: float = 0.4
                 "detections": []
             }
 
+        orig_h, orig_w = cv_img.shape[:2]
+
+        # Auto-resize high resolution images while maintaining aspect ratio (max dim 1600px)
+        max_dim = max(orig_h, orig_w)
+        if max_dim > 1600:
+            scale = 1600.0 / float(max_dim)
+            new_w = int(orig_w * scale)
+            new_h = int(orig_h * scale)
+            cv_img = cv2.resize(cv_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
         img_h, img_w = cv_img.shape[:2]
 
         use_onnx = bool(MODEL_PATH_ONNX and os.path.exists(MODEL_PATH_ONNX))
         use_pt = bool(MODEL_PATH_PT and os.path.exists(MODEL_PATH_PT))
 
-        detections = []
-        raw_boxes = []
-        raw_scores = []
-        raw_classes = []
+        def run_single_pass(target_img: np.ndarray, pass_conf: float):
+            boxes, scores, classes = [], [], []
+            if use_onnx:
+                import onnxruntime as ort
+                session = ort.InferenceSession(MODEL_PATH_ONNX)
+                input_name = session.get_inputs()[0].name
+                blob = cv2.dnn.blobFromImage(target_img, 1/255.0, (640, 640), swapRB=True, crop=False)
+                outputs = session.run(None, {input_name: blob})
+                output = outputs[0][0]
+                num_classes = output.shape[0] - 4
+                for col in range(output.shape[1]):
+                    scores_vec = output[4:4 + num_classes, col]
+                    class_id = int(np.argmax(scores_vec))
+                    score = float(scores_vec[class_id])
+                    if score >= pass_conf:
+                        xc, yc, w, h = output[0:4, col]
+                        x1 = int((xc - w/2) * (img_w / 640.0))
+                        y1 = int((yc - h/2) * (img_h / 640.0))
+                        x2 = int((xc + w/2) * (img_w / 640.0))
+                        y2 = int((yc + h/2) * (img_h / 640.0))
+                        boxes.append([max(0, x1), max(0, y1), min(img_w, x2), min(img_h, y2)])
+                        scores.append(score)
+                        cls_name = CLASSES[class_id] if class_id < len(CLASSES) else f"class_{class_id}"
+                        classes.append(cls_name)
+            elif use_pt:
+                global _YOLO_MODEL_CACHE
+                if _YOLO_MODEL_CACHE is None:
+                    from ultralytics import YOLO
+                    _YOLO_MODEL_CACHE = YOLO(MODEL_PATH_PT)
+                model = _YOLO_MODEL_CACHE
+                results = model(target_img, conf=pass_conf, verbose=False)
+                for r in results:
+                    for box in r.boxes:
+                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                        score = float(box.conf[0].cpu().numpy())
+                        cls_id = int(box.cls[0].cpu().numpy())
+                        boxes.append([int(x1), int(y1), int(x2), int(y2)])
+                        scores.append(score)
+                        cls_name = CLASSES[cls_id] if cls_id < len(CLASSES) else f"class_{cls_id}"
+                        classes.append(cls_name)
+            return boxes, scores, classes
 
-        if use_onnx:
-            import onnxruntime as ort
-            session = ort.InferenceSession(MODEL_PATH_ONNX)
-            input_name = session.get_inputs()[0].name
+        # Pass 1: Standard detection pass
+        raw_boxes, raw_scores, raw_classes = run_single_pass(cv_img, pass_conf=min(conf_threshold, 0.30))
 
-            # Preprocess image tensor to 640x640 RGB float32
-            blob = cv2.dnn.blobFromImage(cv_img, 1/255.0, (640, 640), swapRB=True, crop=False)
-            outputs = session.run(None, {input_name: blob})
+        # Pass 2: Alternative preprocessing pass if 0 detections or max confidence < 0.60
+        max_score = max(raw_scores) if raw_scores else 0.0
+        if len(raw_boxes) == 0 or max_score < 0.60:
+            from cv.preprocessing import enhance_breadboard_contrast, find_breadboard_corners, warp_breadboard_perspective
+            
+            # Pass 2a: CLAHE Contrast enhancement pass
+            clahe_img = enhance_breadboard_contrast(cv_img)
+            b2, s2, c2 = run_single_pass(clahe_img, pass_conf=0.20)
+            raw_boxes.extend(b2)
+            raw_scores.extend(s2)
+            raw_classes.extend(c2)
 
-            # Parse YOLOv8 ONNX output shape [1, 4 + num_classes, 8400]
-            output = outputs[0][0] # (4 + num_classes) x 8400
-            num_classes = output.shape[0] - 4
+            # Pass 2b: Perspective warp pass if corners found
+            rect, _ = find_breadboard_corners(cv_img)
+            if rect is not None:
+                try:
+                    warped_img = warp_breadboard_perspective(cv_img, rect, target_w=800, target_h=300)
+                    b3, s3, c3 = run_single_pass(warped_img, pass_conf=0.20)
+                    # Scale warped coordinates back to normalized cv_img coordinates
+                    w_scale_x = img_w / 800.0
+                    w_scale_y = img_h / 300.0
+                    for box in b3:
+                        scaled_box = [
+                            int(box[0] * w_scale_x),
+                            int(box[1] * w_scale_y),
+                            int(box[2] * w_scale_x),
+                            int(box[3] * w_scale_y)
+                        ]
+                        raw_boxes.append(scaled_box)
+                    raw_scores.extend(s3)
+                    raw_classes.extend(c3)
+                except Exception:
+                    pass
 
-            for col in range(output.shape[1]):
-                scores_vec = output[4:4 + num_classes, col]
-                class_id = int(np.argmax(scores_vec))
-                score = float(scores_vec[class_id])
-
-                if score >= conf_threshold:
-                    xc, yc, w, h = output[0:4, col]
-                    x1 = int((xc - w/2) * (img_w / 640.0))
-                    y1 = int((yc - h/2) * (img_h / 640.0))
-                    x2 = int((xc + w/2) * (img_w / 640.0))
-                    y2 = int((yc + h/2) * (img_h / 640.0))
-
-                    raw_boxes.append([max(0, x1), max(0, y1), min(img_w, x2), min(img_h, y2)])
-                    raw_scores.append(score)
-                    cls_name = CLASSES[class_id] if class_id < len(CLASSES) else f"class_{class_id}"
-                    raw_classes.append(cls_name)
-
-        elif use_pt:
-            global _YOLO_MODEL_CACHE
-            if _YOLO_MODEL_CACHE is None:
-                from ultralytics import YOLO
-                _YOLO_MODEL_CACHE = YOLO(MODEL_PATH_PT)
-            model = _YOLO_MODEL_CACHE
-            results = model(cv_img, conf=conf_threshold, verbose=False)
-
-            for r in results:
-                for box in r.boxes:
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                    score = float(box.conf[0].cpu().numpy())
-                    cls_id = int(box.cls[0].cpu().numpy())
-
-                    raw_boxes.append([int(x1), int(y1), int(x2), int(y2)])
-                    raw_scores.append(score)
-                    cls_name = CLASSES[cls_id] if cls_id < len(CLASSES) else f"class_{cls_id}"
-                    raw_classes.append(cls_name)
-
-        # Step 3: Apply Non-Maximum Suppression (NMS) Filtering
+        # Step 3: Deduplicate overlapping multi-pass detections via Non-Maximum Suppression (NMS)
         keep_indices = nms_bounding_boxes(raw_boxes, raw_scores, iou_threshold=0.45)
 
+        detections = []
         for det_idx, idx in enumerate(keep_indices, 1):
             bbox = raw_boxes[idx]
             score = round(raw_scores[idx], 2)
@@ -221,11 +257,20 @@ def detect_components_yolo(image_input: bytes | str, conf_threshold: float = 0.4
 
             crop_b64 = crop_component_region(cv_img, bbox)
 
+            # Assign Confidence Category (Requirement 8)
+            if score >= 0.75:
+                confidence_category = "CONFIRMED"
+            elif score >= 0.45:
+                confidence_category = "PROBABLE"
+            else:
+                confidence_category = "UNCERTAIN"
+
             detections.append({
                 "id": f"det-{det_idx}",
                 "class": cls_name,
                 "confidence": score,
-                "confidence_warning": score < 0.65,
+                "confidence_category": confidence_category,
+                "confidence_warning": score < 0.60,
                 "bbox_pixels": bbox,
                 "bbox_normalized": bbox_norm,
                 "crop_base64": crop_b64

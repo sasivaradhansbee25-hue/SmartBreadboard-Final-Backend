@@ -7,20 +7,16 @@
  * Route: /scanner-mobile?session=XXXX
  * 
  * Workflow:
- * 1. Opens phone camera with top-down alignment guide.
+ * 1. Opens phone camera interface.
  * 2. Connects to desktop session.
- * 3. User captures ONE single photo.
- * 4. Runs top-angle & quality validation.
- * 5. If valid: shows [ SEND TO DESKTOP ].
- * 6. If invalid: shows ⚠ PHOTO NOT SUITABLE and [ RETAKE ] (never sent to desktop).
- * 7. RETAKE restarts camera for a new capture.
+ * 3. User captures a circuit photo.
+ * 4. Sends image to desktop scanner for analysis.
  */
 
 import React, { useState, useEffect, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Camera, CheckCircle2, AlertTriangle, RotateCcw, Send, RefreshCw, Smartphone, Wifi } from 'lucide-react';
 import { API_BASE_URL, WS_BASE_URL } from '../services/api.js';
-import { validateCircuitImage } from '../services/scannerImageValidator.js';
 
 export default function MobileScanner() {
   const [searchParams] = useSearchParams();
@@ -30,8 +26,6 @@ export default function MobileScanner() {
   const [sessionNotFound, setSessionNotFound] = useState(false);
   const [backendUnreachable, setBackendUnreachable] = useState(false);
   const [capturedPhoto, setCapturedPhoto] = useState(null);
-  const [validationResult, setValidationResult] = useState(null);
-  const [isValidating, setIsValidating] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [isSent, setIsSent] = useState(false);
   const [sendError, setSendError] = useState(null);
@@ -180,31 +174,17 @@ export default function MobileScanner() {
     const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
 
     setCapturedPhoto(dataUrl);
-    setValidationResult(null);
     setIsSent(false);
     stopCamera();
 
-    // Run Top-Angle & Quality Validation
-    setIsValidating(true);
-    try {
-      const valRes = await validateCircuitImage(dataUrl);
-      setValidationResult(valRes);
-    } catch {
-      setValidationResult({
-        valid: true,
-        score: 86,
-        reasons: [],
-        recommendations: [],
-        metrics: { topAngle: 'GOOD', circuitVisibility: 'GOOD', imageQuality: 'GOOD' }
-      });
-    } finally {
-      setIsValidating(false);
-    }
+    // Immediately transmit captured photo to desktop
+    await handleSendToDesktop(dataUrl);
   };
 
-  // 4. Send Validated Photo to Desktop
-  const handleSendToDesktop = async () => {
-    if (!capturedPhoto || !validationResult?.valid) return;
+  // 4. Send Photo to Desktop
+  const handleSendToDesktop = async (overridePhoto = null) => {
+    const photoToSend = overridePhoto || capturedPhoto;
+    if (!photoToSend) return;
     setIsSending(true);
     setSendError(null);
 
@@ -263,10 +243,9 @@ export default function MobileScanner() {
     }
   };
 
-  // 5. Retake Photo: Discard invalid/current image and reopen camera
-  const handleRetake = () => {
+  // 5. Recapture Photo
+  const handleRecapture = () => {
     setCapturedPhoto(null);
-    setValidationResult(null);
     setIsSent(false);
     setSendError(null);
     startCamera();
@@ -437,7 +416,7 @@ export default function MobileScanner() {
                 style={{ width: '100%', height: '100%', objectFit: 'cover' }}
               />
 
-              {/* Top-Angle Alignment Guide Frame */}
+              {/* Camera Framing Guide */}
               <div style={{
                 position: 'absolute',
                 top: '12%',
@@ -457,7 +436,7 @@ export default function MobileScanner() {
                 letterSpacing: '0.05em',
                 textShadow: '0 1px 3px rgba(0,0,0,0.8)'
               }}>
-                ALIGN CIRCUIT FROM TOP (90°)
+                FRAME CIRCUIT IN CAMERA VIEW
               </div>
             </div>
 
@@ -467,14 +446,11 @@ export default function MobileScanner() {
                 CAPTURE CIRCUIT
               </div>
               <div style={{ fontSize: '0.78rem', color: '#94a3b8', marginBottom: '0.4rem' }}>
-                Position your phone directly above the circuit.
+                Position camera over the circuit board.
               </div>
               <div style={{ fontSize: '0.75rem', color: '#cbd5e1', display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
                 <div>✓ Complete circuit visible</div>
-                <div>✓ Top/near-top angle</div>
-                <div>✓ Good lighting</div>
-                <div>✓ Sharp image</div>
-                <div>✓ Circuit centered</div>
+                <div>✓ Circuit centered in frame</div>
               </div>
             </div>
 
@@ -513,12 +489,7 @@ export default function MobileScanner() {
               />
             </div>
 
-            {isValidating ? (
-              <div style={{ textAlign: 'center', padding: '1.5rem', color: '#38bdf8' }}>
-                <RefreshCw size={28} className="animate-spin" style={{ margin: '0 auto 0.5rem', display: 'block' }} />
-                <div style={{ fontSize: '0.85rem', fontWeight: 600 }}>Validating top angle & circuit quality...</div>
-              </div>
-            ) : isSent ? (
+            {isSent ? (
               <div style={{ textAlign: 'center', padding: '1.25rem', marginTop: '1rem', borderRadius: '10px', background: 'rgba(34, 197, 94, 0.15)', border: '1px solid #22c55e', color: '#4ade80' }}>
                 <CheckCircle2 size={32} style={{ margin: '0 auto 0.4rem', display: 'block' }} />
                 <div style={{ fontSize: '0.95rem', fontWeight: 800 }}>✓ SENT TO DESKTOP!</div>
@@ -526,29 +497,18 @@ export default function MobileScanner() {
                   Your circuit image has been received by your desktop scanner. Click Analyze Circuit on your desktop to view the 3D twin & AR simulation.
                 </div>
                 <button
-                  onClick={handleRetake}
+                  onClick={handleRecapture}
                   style={{ marginTop: '0.9rem', padding: '0.45rem 1rem', borderRadius: '8px', background: 'rgba(255,255,255,0.08)', color: '#94a3b8', border: '1px solid #475569', fontSize: '0.8rem', fontWeight: 600, cursor: 'pointer' }}
                 >
                   Capture Another Photo
                 </button>
               </div>
-            ) : validationResult?.valid ? (
-              /* Section 3: Valid Photo Card */
-              <div style={{ marginTop: '0.85rem', padding: '0.85rem 1rem', borderRadius: '10px', background: 'rgba(16, 185, 129, 0.12)', border: '1px solid #10b981' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', color: '#10b981', fontWeight: 800, fontSize: '0.92rem', marginBottom: '0.45rem' }}>
-                  <CheckCircle2 size={18} />
-                  <span>✓ CIRCUIT VIEW ACCEPTED</span>
-                </div>
-
-                <div style={{ fontSize: '0.8rem', color: '#cbd5e1', display: 'flex', flexDirection: 'column', gap: '0.15rem', marginBottom: '0.85rem' }}>
-                  <div>Top-angle: <strong style={{ color: '#10b981' }}>{validationResult.metrics?.topAngle || 'GOOD'}</strong></div>
-                  <div>Circuit visibility: <strong style={{ color: '#10b981' }}>{validationResult.metrics?.circuitVisibility || 'GOOD'}</strong></div>
-                  <div>Image quality: <strong style={{ color: '#10b981' }}>{validationResult.metrics?.imageQuality || 'GOOD'}</strong></div>
-                </div>
-
+            ) : (
+              /* Photo Actions */
+              <div style={{ marginTop: '0.85rem' }}>
                 <div style={{ display: 'flex', gap: '0.6rem' }}>
                   <button
-                    onClick={handleSendToDesktop}
+                    onClick={() => handleSendToDesktop()}
                     disabled={isSending}
                     style={{
                       flex: 1,
@@ -567,10 +527,10 @@ export default function MobileScanner() {
                       boxShadow: '0 4px 12px rgba(16, 185, 129, 0.4)'
                     }}
                   >
-                    <Send size={15} /> {isSending ? 'Sending...' : '[ SEND TO DESKTOP ]'}
+                    <Send size={15} /> {isSending ? 'Sending...' : 'Send to Desktop'}
                   </button>
                   <button
-                    onClick={handleRetake}
+                    onClick={handleRecapture}
                     style={{
                       padding: '0.65rem 0.9rem',
                       borderRadius: '8px',
@@ -582,7 +542,7 @@ export default function MobileScanner() {
                       cursor: 'pointer'
                     }}
                   >
-                    [ RETAKE ]
+                    Recapture
                   </button>
                 </div>
 
@@ -591,47 +551,6 @@ export default function MobileScanner() {
                     ⚠ {sendError}
                   </div>
                 )}
-              </div>
-            ) : (
-              /* Section 4: Invalid Photo Card */
-              <div style={{ marginTop: '0.85rem', padding: '0.85rem 1rem', borderRadius: '10px', background: 'rgba(239, 68, 68, 0.12)', border: '1px solid #ef4444' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', color: '#ef4444', fontWeight: 800, fontSize: '0.92rem', marginBottom: '0.4rem' }}>
-                  <AlertTriangle size={18} />
-                  <span>⚠ PHOTO NOT SUITABLE</span>
-                </div>
-
-                <div style={{ fontSize: '0.8rem', color: '#fca5a5', marginBottom: '0.45rem' }}>
-                  {validationResult?.reasons?.map((r, i) => (
-                    <div key={i} style={{ marginBottom: '0.15rem' }}>• {r}</div>
-                  ))}
-                </div>
-
-                {validationResult?.recommendations?.length > 0 && (
-                  <div style={{ fontSize: '0.78rem', color: '#cbd5e1', marginBottom: '0.75rem' }}>
-                    <strong>Guidance:</strong> {validationResult.recommendations.join(' ')}
-                  </div>
-                )}
-
-                <button
-                  onClick={handleRetake}
-                  style={{
-                    width: '100%',
-                    padding: '0.65rem',
-                    borderRadius: '8px',
-                    background: '#ef4444',
-                    color: '#ffffff',
-                    border: 'none',
-                    fontWeight: 800,
-                    fontSize: '0.85rem',
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: '0.4rem'
-                  }}
-                >
-                  <RotateCcw size={15} /> [ RETAKE ]
-                </button>
               </div>
             )}
           </div>

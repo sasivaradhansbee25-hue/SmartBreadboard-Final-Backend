@@ -49,6 +49,7 @@ import {
 } from 'lucide-react';
 import { useCircuit } from '../context/CircuitContext';
 import RealCameraARCanvas from '../components/RealCameraARCanvas';
+import { apiRequest, WS_BASE_URL } from '../services/api';
 import {
   calculateTrainerVirtualCurrent,
   calculateM1Current,
@@ -60,7 +61,9 @@ export default function CircuitDiagramAR() {
   const navigate = useNavigate();
   const {
     activeCircuit,
-    uploadedImage
+    uploadedImage,
+    hardwareTelemetry,
+    setHardwareTelemetry
   } = useCircuit();
 
   // AR View Mode: 'camera' (Live Camera Feed) | 'image' (Uploaded Photo Reference)
@@ -71,13 +74,132 @@ export default function CircuitDiagramAR() {
   const [sw1State, setSw1State] = useState('ON');
   const [sw2State, setSw2State] = useState('ON');
 
-  // ESP32 Hardware Telemetry State
-  const [esp32Connected, setEsp32Connected] = useState(true);
+  // ESP32 Hardware Connection State: 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'ERROR'
+  const [connectionStatus, setConnectionStatus] = useState(() => hardwareTelemetry?.status || 'CONNECTED');
 
   // Media references
   const imageRef = useRef(null);
   const videoRef = useRef(null);
   const [isCameraActive, setIsCameraActive] = useState(false);
+
+  // Real-Time ESP32 Hardware Connection Toggle
+  const handleToggleHardwareConnection = useCallback(async () => {
+    if (connectionStatus === 'CONNECTED' || connectionStatus === 'CONNECTING') {
+      setConnectionStatus('DISCONNECTED');
+      setHardwareTelemetry(prev => ({
+        ...prev,
+        status: 'DISCONNECTED',
+        connected: false
+      }));
+      try {
+        await apiRequest('/hardware/disconnect', 'POST');
+      } catch (e) {
+        console.warn('Disconnect hardware endpoint warning:', e);
+      }
+    } else {
+      setConnectionStatus('CONNECTING');
+      try {
+        const res = await apiRequest('/hardware/connect', 'POST');
+        if (res && (res.success || res.status === 'CONNECTED' || res.telemetry)) {
+          const telemetryData = res.telemetry || {};
+          setConnectionStatus('CONNECTED');
+          setHardwareTelemetry(prev => ({
+            ...prev,
+            ...telemetryData,
+            status: 'CONNECTED',
+            connected: true,
+            timestamp: telemetryData.timestamp || new Date().toISOString(),
+            last_received: telemetryData.last_received || Date.now()
+          }));
+        } else {
+          setConnectionStatus('ERROR');
+          setHardwareTelemetry(prev => ({ ...prev, status: 'ERROR', connected: false }));
+        }
+      } catch (err) {
+        console.error('Failed to connect hardware:', err);
+        setConnectionStatus('ERROR');
+        setHardwareTelemetry(prev => ({ ...prev, status: 'ERROR', connected: false }));
+      }
+    }
+  }, [connectionStatus, setHardwareTelemetry]);
+
+  // Real-Time ESP32 Telemetry Subscription (WebSocket + HTTP Polling Fallback)
+  useEffect(() => {
+    if (connectionStatus !== 'CONNECTED') return;
+
+    let ws = null;
+    let pollInterval = null;
+
+    const startPolling = () => {
+      if (pollInterval) return;
+      pollInterval = setInterval(async () => {
+        try {
+          const res = await apiRequest('/hardware/telemetry', 'GET');
+          if (res && res.status !== 'offline_mock_fallback' && (res.voltage !== undefined || res.status === 'CONNECTED')) {
+            setHardwareTelemetry(prev => ({
+              ...prev,
+              ...res,
+              status: 'CONNECTED',
+              connected: true,
+              last_received: Date.now()
+            }));
+          }
+        } catch (err) {
+          console.warn('Telemetry polling error:', err);
+        }
+      }, 1000);
+    };
+
+    try {
+      const wsUrl = `${WS_BASE_URL}/ws/hardware/telemetry`;
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        console.log('[ESP32 Hardware WS] Connected');
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data) {
+            setHardwareTelemetry(prev => ({
+              ...prev,
+              ...data,
+              status: 'CONNECTED',
+              connected: true,
+              last_received: Date.now()
+            }));
+          }
+        } catch (e) {
+          console.warn('[ESP32 Hardware WS] Parse error:', e);
+        }
+      };
+
+      ws.onerror = () => {
+        console.warn('[ESP32 Hardware WS] Error, switching to HTTP polling fallback');
+        startPolling();
+      };
+
+      ws.onclose = () => {
+        console.log('[ESP32 Hardware WS] Closed, starting HTTP polling fallback');
+        startPolling();
+      };
+    } catch (e) {
+      console.warn('[ESP32 Hardware WS] Initialization failed, using HTTP polling:', e);
+      startPolling();
+    }
+
+    return () => {
+      if (ws) {
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onerror = null;
+        ws.onclose = null;
+        ws.close();
+      }
+      if (pollInterval) clearInterval(pollInterval);
+    };
+  }, [connectionStatus, setHardwareTelemetry]);
 
   // Active analyzed circuit data
   const [analyzedCircuit, setAnalyzedCircuit] = useState(null);
@@ -319,37 +441,44 @@ export default function CircuitDiagramAR() {
             gap: '0.45rem',
             padding: '0.35rem 0.85rem',
             borderRadius: '20px',
-            background: esp32Connected ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)',
-            border: `1px solid ${esp32Connected ? '#10b981' : '#ef4444'}`,
+            background: connectionStatus === 'CONNECTED' ? 'rgba(16, 185, 129, 0.15)' :
+                        connectionStatus === 'CONNECTING' ? 'rgba(245, 158, 11, 0.15)' :
+                        connectionStatus === 'ERROR' ? 'rgba(239, 68, 68, 0.25)' : 'rgba(239, 68, 68, 0.15)',
+            border: `1px solid ${connectionStatus === 'CONNECTED' ? '#10b981' :
+                               connectionStatus === 'CONNECTING' ? '#f59e0b' : '#ef4444'}`,
             fontSize: '0.75rem',
             fontWeight: 800,
-            color: esp32Connected ? '#34d399' : '#f87171'
+            color: connectionStatus === 'CONNECTED' ? '#34d399' :
+                   connectionStatus === 'CONNECTING' ? '#fbbf24' : '#f87171'
           }}>
             <span style={{
               width: '8px',
               height: '8px',
               borderRadius: '50%',
-              background: esp32Connected ? '#10b981' : '#ef4444'
+              background: connectionStatus === 'CONNECTED' ? '#10b981' :
+                          connectionStatus === 'CONNECTING' ? '#f59e0b' : '#ef4444'
             }} />
-            {esp32Connected ? 'ESP32 ● CONNECTED' : 'ESP32 ● DISCONNECTED'}
+            {connectionStatus === 'CONNECTED' ? 'ESP32 ● CONNECTED' :
+             connectionStatus === 'CONNECTING' ? 'ESP32 ● CONNECTING...' :
+             connectionStatus === 'ERROR' ? 'ESP32 ● ERROR' : 'ESP32 ● DISCONNECTED'}
           </div>
 
-          {/* Toggle for Acceptance Test 7 */}
           <button
-            onClick={() => setEsp32Connected(prev => !prev)}
-            title="Simulate ESP32 USB Connection State"
+            onClick={handleToggleHardwareConnection}
+            disabled={connectionStatus === 'CONNECTING'}
             style={{
               padding: '0.35rem 0.65rem',
               borderRadius: '6px',
               background: 'rgba(30, 41, 59, 0.8)',
               border: '1px solid #334155',
-              color: '#94a3b8',
+              color: connectionStatus === 'CONNECTED' ? '#f87171' : '#38bdf8',
               fontSize: '0.72rem',
               fontWeight: 700,
-              cursor: 'pointer'
+              cursor: connectionStatus === 'CONNECTING' ? 'not-allowed' : 'pointer'
             }}
           >
-            {esp32Connected ? 'Disconnect USB' : 'Connect USB'}
+            {connectionStatus === 'CONNECTED' ? 'Disconnect Hardware' :
+             connectionStatus === 'CONNECTING' ? 'Connecting...' : 'Connect Hardware'}
           </button>
         </div>
       </header>
@@ -784,31 +913,51 @@ export default function CircuitDiagramAR() {
               gap: '0.4rem'
             }}>
               <Cpu size={16} />
-              ESP32
+              ESP32 TELEMETRY
             </div>
 
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.8rem' }}>
               <span style={{ color: '#94a3b8' }}>Status:</span>
               <span style={{
                 fontWeight: 800,
-                color: esp32Connected ? '#34d399' : '#f87171'
+                color: connectionStatus === 'CONNECTED' ? '#34d399' :
+                       connectionStatus === 'CONNECTING' ? '#fbbf24' : '#f87171'
               }}>
-                {esp32Connected ? 'CONNECTED' : 'DISCONNECTED'}
+                {connectionStatus}
               </span>
             </div>
 
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.8rem' }}>
               <span style={{ color: '#94a3b8' }}>HARDWARE CURRENT:</span>
               <strong style={{
-                color: esp32Connected ? '#f8fafc' : '#f87171',
+                color: connectionStatus === 'CONNECTED' ? '#f8fafc' : '#f87171',
                 fontFamily: 'monospace'
               }}>
-                {esp32Connected ? `${virtualTotalCurrent.toFixed(2)} mA` : 'ESP32 Disconnected'}
+                {connectionStatus === 'CONNECTED'
+                  ? `${(hardwareTelemetry?.current_ma ?? virtualTotalCurrent).toFixed(2)} mA`
+                  : 'ESP32 Disconnected'}
               </strong>
             </div>
 
-            <div style={{ fontSize: '0.7rem', color: '#64748b', borderTop: '1px solid #1e293b', paddingTop: '0.45rem' }}>
-              Source: {esp32Connected ? 'ESP32 Hardware (USB)' : 'None (Hardware Offline)'}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.8rem' }}>
+              <span style={{ color: '#94a3b8' }}>VOLTAGE / POWER:</span>
+              <span style={{ color: '#e2e8f0', fontFamily: 'monospace' }}>
+                {(hardwareTelemetry?.voltage ?? 0).toFixed(2)}V / {(hardwareTelemetry?.power_mw ?? 0).toFixed(1)}mW
+              </span>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.8rem' }}>
+              <span style={{ color: '#94a3b8' }}>ADC (RAW / V):</span>
+              <span style={{ color: '#e2e8f0', fontFamily: 'monospace' }}>
+                {hardwareTelemetry?.adc_raw ?? 0} ({(hardwareTelemetry?.adc_voltage ?? 0).toFixed(2)}V)
+              </span>
+            </div>
+
+            <div style={{ fontSize: '0.7rem', color: '#64748b', borderTop: '1px solid #1e293b', paddingTop: '0.45rem', display: 'flex', justifyContent: 'space-between' }}>
+              <span>Source: {connectionStatus === 'CONNECTED' ? 'ESP32 Hardware (Live)' : 'None (Hardware Offline)'}</span>
+              {hardwareTelemetry?.timestamp && (
+                <span>Last: {new Date(hardwareTelemetry.timestamp).toLocaleTimeString()}</span>
+              )}
             </div>
           </div>
 

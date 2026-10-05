@@ -169,34 +169,35 @@ def analyze_resistor_color(crop_input: bytes | str, resistor_id: str = "R1") -> 
             detected_bands.append(color_name)
             band_confidences.append(conf)
 
-        if len(detected_bands) < 4:
-            detected_bands = ["brown", "black", "red", "gold"]
-            band_confidences = [0.92, 0.90, 0.88, 0.95]
-
         avg_confidence = round(float(np.mean(band_confidences)), 2)
-        confidence_warning = avg_confidence < 0.65
+        is_uncertain = avg_confidence < 0.60 or len(detected_bands) < 4
+        confidence_warning = is_uncertain
 
         warnings = []
-        if confidence_warning:
-            warnings.append("[WARNING] Resistor color-band value uncertain - manual verification recommended.")
+        if is_uncertain:
+            warnings.append("[WARNING] Resistor color-band value uncertain due to lighting or contrast.")
 
         decoded = decode_resistor_bands(detected_bands)
+
+        formatted_val = "UNCERTAIN" if is_uncertain else decoded["formatted"]
 
         detected_payload = {
             "resistor_id": resistor_id,
             "band_count": len(detected_bands),
-            "bands": detected_bands,
-            "resistance_ohms": decoded["resistance_ohms"],
-            "tolerance": decoded["tolerance"],
-            "formatted_value": decoded["formatted"],
+            "bands": detected_bands if not is_uncertain else [],
+            "resistance_ohms": decoded["resistance_ohms"] if not is_uncertain else None,
+            "tolerance": decoded["tolerance"] if not is_uncertain else None,
+            "formatted_value": formatted_val,
             "confidence": avg_confidence,
+            "confidence_category": "CONFIRMED" if avg_confidence >= 0.75 else ("PROBABLE" if avg_confidence >= 0.60 else "UNCERTAIN"),
             "confidence_warning": confidence_warning,
+            "is_uncertain": is_uncertain,
             "warnings": warnings
         }
 
         # AGENTS.md Rule 5: Keep detected_value and user_override_value separate
         return {
-            "status": "success",
+            "status": "success" if not is_uncertain else "uncertain",
             "resistor_id": resistor_id,
             "detected_value": detected_payload,
             "user_override_value": None

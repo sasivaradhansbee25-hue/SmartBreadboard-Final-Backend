@@ -57,12 +57,20 @@ export function CircuitProvider({ children }) {
   });
   const [simulationStatus, setSimulationStatus] = useState('READY');
   const [simulationError, setSimulationError] = useState(null);
-  const [simulationSignature, setSimulationSignature] = useState(null);
-
-  // Phase 24.4: Real RLC Transient Simulation Timeline & Playback State
-  const [currentTimeIndex, setCurrentTimeIndex] = useState(0);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
+  // ESP32 Real-Time Hardware Telemetry State
+  const [hardwareTelemetry, setHardwareTelemetry] = useState({
+    status: 'DISCONNECTED', // 'CONNECTING' | 'CONNECTED' | 'DISCONNECTED' | 'ERROR'
+    connected: false,
+    device: 'ESP32_WROOM_32',
+    voltage: 0,
+    current_ma: 0,
+    power_mw: 0,
+    adc_raw: 0,
+    adc_voltage: 0,
+    digital_pins: { GPIO2: 0, GPIO4: 0, SW1: 0, SW2: 0 },
+    timestamp: null,
+    last_received: null
+  });
 
   const invalidateSimulation = useCallback((reason = null) => {
     setSimulationResult(null);
@@ -957,7 +965,10 @@ export function CircuitProvider({ children }) {
       pauseSimulation,
       restartSimulation,
       seekSimulation,
-      resetSimulation
+      resetSimulation,
+      // Real-Time ESP32 Hardware Telemetry
+      hardwareTelemetry,
+      setHardwareTelemetry
     }}>
       {children}
     </CircuitContext.Provider>

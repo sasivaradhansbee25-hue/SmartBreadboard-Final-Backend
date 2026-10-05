@@ -12,6 +12,10 @@ import {
   resolveFrontendBaseUrl
 } from '../config/api.js';
 
+export const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_BASE_URL)
+  ? import.meta.env.VITE_API_BASE_URL
+  : 'https://smartbreadboard-final-backend.onrender.com';
+
 export {
   API_BASE_URL,
   FRONTEND_BASE_URL,

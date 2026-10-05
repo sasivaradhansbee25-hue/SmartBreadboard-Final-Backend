@@ -32,7 +32,6 @@ import SimulationWaveformPanel from './SimulationWaveformPanel';
 import Breadboard3DCanvas from './Breadboard3DCanvas';
 import ARCameraOverlay from './ARCameraOverlay';
 import { formatVoltage, formatCurrent, formatPower } from '../utils/electricalFormatter';
-import { validateCircuitImage } from '../services/scannerImageValidator.js';
 
 export default function PhotoCircuitMapper({ onComplete = null }) {
   const navigate = useNavigate();
@@ -63,11 +62,9 @@ export default function PhotoCircuitMapper({ onComplete = null }) {
   const [errorMessage, setErrorMessage] = useState(null);
   const [pipelineResult, setPipelineResult] = useState(null);
 
-  // Single-Photo Validation & Retake System
+  // Single-Photo State
   const [capturedImage, setCapturedImage] = useState(null);
   const [acceptedCircuitImage, setAcceptedCircuitImage] = useState(null);
-  const [validationResult, setValidationResult] = useState(null);
-  const [isValidating, setIsValidating] = useState(false);
   const [detectionConfidenceError, setDetectionConfidenceError] = useState(null);
 
   // View Mode: 'photo' | '3d' | 'ar' (Requirement 8)
@@ -116,7 +113,7 @@ export default function PhotoCircuitMapper({ onComplete = null }) {
     }
   }, [pipelineResult, imagePreview, setRealCircuitData]);
 
-  // 1. File Upload Handler with Immediate Validation
+  // 1. File Upload Handler with Immediate Backend Processing
   const handleFileUpload = (e) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -125,28 +122,16 @@ export default function PhotoCircuitMapper({ onComplete = null }) {
         const dataUrl = evt.target?.result;
         setCapturedImage(dataUrl);
         setImagePreview(dataUrl);
-        setAcceptedCircuitImage(null);
+        setAcceptedCircuitImage(dataUrl);
+        setUploadedImage(dataUrl);
         setValidationResult(null);
         setDetectionConfidenceError(null);
         setPipelineResult(null);
         setErrorMessage(null);
         stopCamera();
 
-        setIsValidating(true);
-        try {
-          const valRes = await validateCircuitImage(dataUrl);
-          setValidationResult(valRes);
-        } catch {
-          setValidationResult({
-            valid: true,
-            score: 85,
-            reasons: [],
-            recommendations: [],
-            metrics: { topAngle: 'GOOD', circuitVisibility: 'GOOD', imageQuality: 'GOOD' }
-          });
-        } finally {
-          setIsValidating(false);
-        }
+        // Immediately send image to backend analysis pipeline
+        await processImage(dataUrl);
       };
       reader.readAsDataURL(file);
     }
@@ -190,7 +175,7 @@ export default function PhotoCircuitMapper({ onComplete = null }) {
     setIsCameraActive(false);
   };
 
-  // 3. Capture Frame from Live Camera with Immediate Top-Angle Validation
+  // 3. Capture Frame from Live Camera with Immediate Backend Processing
   const captureCameraFrame = async () => {
     if (!videoRef.current) return;
     const canvas = document.createElement('canvas');
@@ -202,44 +187,22 @@ export default function PhotoCircuitMapper({ onComplete = null }) {
 
     setCapturedImage(dataUrl);
     setImagePreview(dataUrl);
-    setAcceptedCircuitImage(null);
+    setAcceptedCircuitImage(dataUrl);
+    setUploadedImage(dataUrl);
     setValidationResult(null);
     setDetectionConfidenceError(null);
     setPipelineResult(null);
     setErrorMessage(null);
     stopCamera();
 
-    setIsValidating(true);
-    try {
-      const valRes = await validateCircuitImage(dataUrl);
-      setValidationResult(valRes);
-    } catch {
-      setValidationResult({
-        valid: true,
-        score: 85,
-        reasons: [],
-        recommendations: [],
-        metrics: { topAngle: 'GOOD', circuitVisibility: 'GOOD', imageQuality: 'GOOD' }
-      });
-    } finally {
-      setIsValidating(false);
-    }
+    // Immediately send captured photo to backend analysis pipeline
+    await processImage(dataUrl);
   };
 
-  // User accepts validated photo to proceed to YOLO detection & AR
-  const handleAcceptAndUsePhoto = async () => {
-    if (!validationResult || !validationResult.valid || !capturedImage) return;
-    setAcceptedCircuitImage(capturedImage);
-    setUploadedImage(capturedImage);
-    setDetectionConfidenceError(null);
-    await processImage(capturedImage);
-  };
-
-  // Retake behavior: clears invalid state, discards image, reopens camera capture
-  const handleRetake = () => {
+  // Reset photo selection
+  const handleClearImage = () => {
     setCapturedImage(null);
     setAcceptedCircuitImage(null);
-    setValidationResult(null);
     setDetectionConfidenceError(null);
     setImagePreview(null);
     setPipelineResult(null);
@@ -392,9 +355,8 @@ export default function PhotoCircuitMapper({ onComplete = null }) {
     try {
       const res = await mapPhotoToCircuitApi(imgData, mockDets);
       setPipelineResult(res);
-      // Section 11: If circuit not clearly detected, show RETAKE, never substitute Circuit 1/2/3
       if (!res.components || res.components.length === 0) {
-        setDetectionConfidenceError('No recognizable circuit components were detected in this image. Please retake the photo with good lighting and a clear top-angle view.');
+        setDetectionConfidenceError('No supported electronic components detected.');
       }
     } catch (err) {
       setErrorMessage(err.message || 'Mapping pipeline encountered an error.');
@@ -427,20 +389,19 @@ export default function PhotoCircuitMapper({ onComplete = null }) {
     );
   }, [pipelineResult, unverifiedComponents]);
 
-  // Section 14: 10 Explicit Lifecycle Stages & Failed State Identification
+  // Section 14: Lifecycle Stages & Failed State Identification
   const currentPipelineStage = useMemo(() => {
     if (errorMessage) return { text: 'ERROR', isError: true, desc: errorMessage };
     if (isConnectionsUnverified) return { text: 'CIRCUIT CONNECTIONS NOT VERIFIED', isError: true, desc: 'Component terminal mapping could not be reliably verified.' };
-    if (detectionConfidenceError) return { text: 'COMPONENT DETECTION FAILED', isError: true, desc: detectionConfidenceError };
+    if (detectionConfidenceError) return { text: 'NO COMPONENTS DETECTED', isError: true, desc: detectionConfidenceError };
     if (simulationStatus === 'SOLVED') return { text: '10. SIMULATION READY', isError: false, desc: 'Real circuit electrical simulation solved' };
     if (viewMode === 'ar') return { text: '9. AR READY', isError: false, desc: 'AR overlay active over physical photo reference' };
     if (simulationStatus === 'RUNNING') return { text: '8. STARTING SIMULATION', isError: false, desc: 'Calculating node voltages & currents' };
     if (viewMode === '3d' || (pipelineResult?.status === 'READY' && activeCircuit)) return { text: '7. BUILDING 3D MODEL', isError: false, desc: 'Rendering digital twin on canonical breadboard' };
     if (isProcessing) return { text: '4. DETECTING COMPONENTS & 5. MAPPING CONNECTIONS', isError: false, desc: 'AI object detection & pin-to-hole registration' };
-    if (acceptedCircuitImage || (validationResult && validationResult.valid)) return { text: '3. IMAGE ACCEPTED', isError: false, desc: 'Top-angle photo verified' };
-    if (isValidating) return { text: '2. VALIDATING IMAGE', isError: false, desc: 'Checking sharpness, angle & circuit visibility' };
-    return { text: '1. WAITING FOR IMAGE', isError: false, desc: 'Ready for top-angle breadboard photo' };
-  }, [errorMessage, isConnectionsUnverified, detectionConfidenceError, simulationStatus, viewMode, activeCircuit, pipelineResult, isProcessing, acceptedCircuitImage, validationResult, isValidating]);
+    if (acceptedCircuitImage) return { text: '3. IMAGE RECEIVED', isError: false, desc: 'Circuit photo loaded' };
+    return { text: '1. WAITING FOR IMAGE', isError: false, desc: 'Ready for breadboard photo' };
+  }, [errorMessage, isConnectionsUnverified, detectionConfidenceError, simulationStatus, viewMode, activeCircuit, pipelineResult, isProcessing, acceptedCircuitImage]);
 
   // Selected Component for Instantaneous Readout (Requirement 9)
   const inspectedComp = useMemo(() => {
@@ -759,26 +720,75 @@ export default function PhotoCircuitMapper({ onComplete = null }) {
             </div>
           </div>
           <button
-            onClick={handleRetake}
+            onClick={() => setImagePreview(null)}
+            className="btn btn-secondary"
             style={{
-              padding: '0.5rem 1.1rem',
-              borderRadius: '6px',
-              background: '#ef4444',
-              color: '#ffffff',
-              border: 'none',
-              fontWeight: 700,
-              fontSize: '0.82rem',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '0.4rem',
+              padding: '0.45rem 0.85rem',
+              fontSize: '0.8rem',
               flexShrink: 0
             }}
           >
-            <RotateCcw size={14} /> [ RETAKE ]
+            Clear Image
           </button>
         </div>
       )}
+
+      {/* Requirement 9: Scanner UX Status States Banner */}
+      {isProcessing ? (
+        <div style={{
+          background: 'rgba(56, 189, 248, 0.12)',
+          border: '1px solid #38bdf8',
+          color: '#bae6fd',
+          padding: '0.65rem 1rem',
+          borderRadius: '8px',
+          marginBottom: '1.25rem',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.6rem',
+          fontSize: '0.85rem',
+          fontWeight: 700
+        }}>
+          <RefreshCw size={18} className="animate-spin" color="#38bdf8" />
+          <span>Analysing image...</span>
+        </div>
+      ) : pipelineResult ? (
+        <div style={{
+          background: pipelineResult.status === 'READY'
+            ? 'rgba(34, 197, 94, 0.12)'
+            : (pipelineResult.status === 'POOR_QUALITY' || pipelineResult.status === 'NO_COMPONENTS_DETECTED'
+              ? 'rgba(239, 68, 68, 0.12)'
+              : 'rgba(245, 158, 11, 0.12)'),
+          border: `1px solid ${pipelineResult.status === 'READY' ? '#22c55e' : (pipelineResult.status === 'POOR_QUALITY' || pipelineResult.status === 'NO_COMPONENTS_DETECTED' ? '#ef4444' : '#f59e0b')}`,
+          color: pipelineResult.status === 'READY' ? '#4ade80' : (pipelineResult.status === 'POOR_QUALITY' || pipelineResult.status === 'NO_COMPONENTS_DETECTED' ? '#fca5a5' : '#fde68a'),
+          padding: '0.65rem 1rem',
+          borderRadius: '8px',
+          marginBottom: '1.25rem',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.6rem',
+          fontSize: '0.85rem',
+          fontWeight: 700
+        }}>
+          {pipelineResult.status === 'READY' ? (
+            <CheckCircle2 size={18} color="#4ade80" />
+          ) : (pipelineResult.status === 'POOR_QUALITY' || pipelineResult.status === 'NO_COMPONENTS_DETECTED' ? (
+            <XCircle size={18} color="#ef4444" />
+          ) : (
+            <AlertTriangle size={18} color="#f59e0b" />
+          ))}
+          <span>
+            {pipelineResult.status_message || (
+              pipelineResult.status === 'READY'
+                ? "Analysis complete"
+                : (pipelineResult.status === 'POOR_QUALITY'
+                  ? "Image quality is insufficient for reliable analysis."
+                  : (pipelineResult.status === 'NO_COMPONENTS_DETECTED'
+                    ? "No reliable electronic circuit components detected."
+                    : "Partial analysis completed — some components could not be identified reliably."))
+            )}
+          </span>
+        </div>
+      ) : null}
 
       {/* Requirement 12: Clear Error Handling Banners */}
       {simulationStatus === 'BLOCKED' && (
@@ -1021,7 +1031,7 @@ export default function PhotoCircuitMapper({ onComplete = null }) {
             {/* Viewport Viewers (520px) */}
             <div style={{ position: 'relative', width: '100%', minHeight: '520px', borderRadius: '10px', overflow: 'hidden', border: '1px solid #1e293b', background: '#020617' }}>
 
-              {/* 1. PHOTO VIEW WITH SINGLE-PHOTO TOP-ANGLE VALIDATION & RETAKE */}
+              {/* 1. PHOTO VIEW & CAPTURE */}
               <div style={{ display: viewMode === 'photo' ? 'block' : 'none', width: '100%', height: '100%', minHeight: '520px' }}>
                 {isCameraActive ? (
                   <div style={{ position: 'relative', width: '100%', height: '520px', background: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -1031,7 +1041,7 @@ export default function PhotoCircuitMapper({ onComplete = null }) {
                       playsInline
                       style={{ maxWidth: '100%', maxHeight: '520px', objectFit: 'contain' }}
                     />
-                    {/* Top-angle alignment guide */}
+                    {/* Camera framing guide */}
                     <div style={{
                       position: 'absolute',
                       top: '12%',
@@ -1051,7 +1061,7 @@ export default function PhotoCircuitMapper({ onComplete = null }) {
                       letterSpacing: '0.05em',
                       textShadow: '0 1px 3px rgba(0,0,0,0.8)'
                     }}>
-                      ALIGN CIRCUIT DIRECTLY FROM TOP (90° VIEW)
+                      FRAME CIRCUIT IN CAMERA VIEW
                     </div>
                     <button
                       onClick={captureCameraFrame}
@@ -1077,133 +1087,15 @@ export default function PhotoCircuitMapper({ onComplete = null }) {
                       <Camera size={16} /> Capture Photo
                     </button>
                   </div>
-                ) : isValidating ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '520px', color: '#38bdf8', gap: '0.75rem' }}>
-                    <RefreshCw size={36} className="animate-spin" />
-                    <p style={{ margin: 0, fontSize: '0.92rem', fontWeight: 600 }}>Validating top viewing angle & image quality...</p>
-                  </div>
                 ) : imagePreview ? (
                   <div style={{ width: '100%', minHeight: '520px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: '#020617', padding: '1rem' }}>
                     <img
                       src={imagePreview}
                       alt="Captured Breadboard Preview"
-                      style={{ maxWidth: '100%', maxHeight: validationResult ? '360px' : '480px', objectFit: 'contain', borderRadius: '8px', border: '1px solid #1e293b' }}
+                      style={{ maxWidth: '100%', maxHeight: '480px', objectFit: 'contain', borderRadius: '8px', border: '1px solid #1e293b' }}
                     />
 
-                    {/* Section 7: Validation Result Card */}
-                    {validationResult && (
-                      <div style={{
-                        marginTop: '0.85rem',
-                        width: '100%',
-                        maxWidth: '560px',
-                        padding: '0.9rem 1.1rem',
-                        borderRadius: '10px',
-                        background: validationResult.valid ? 'rgba(16, 185, 129, 0.12)' : 'rgba(239, 68, 68, 0.12)',
-                        border: validationResult.valid ? '1px solid #10b981' : '1px solid #ef4444'
-                      }}>
-                        {validationResult.valid ? (
-                          <div>
-                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', color: '#10b981', fontWeight: 800, fontSize: '0.92rem' }}>
-                                <CheckCircle2 size={18} />
-                                <span>✓ CIRCUIT VIEW ACCEPTED</span>
-                              </div>
-                              <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#10b981', background: 'rgba(16, 185, 129, 0.2)', padding: '0.2rem 0.55rem', borderRadius: '4px' }}>
-                                Score: {validationResult.score}/100
-                              </span>
-                            </div>
-
-                            <div style={{ display: 'flex', gap: '1.25rem', fontSize: '0.8rem', color: '#cbd5e1', marginBottom: '0.85rem', flexWrap: 'wrap' }}>
-                              <div>Top-angle: <strong style={{ color: '#10b981' }}>{validationResult.metrics?.topAngle || 'GOOD'}</strong></div>
-                              <div>Circuit visibility: <strong style={{ color: '#10b981' }}>{validationResult.metrics?.circuitVisibility || 'GOOD'}</strong></div>
-                              <div>Image quality: <strong style={{ color: '#10b981' }}>{validationResult.metrics?.imageQuality || 'GOOD'}</strong></div>
-                            </div>
-
-                            <div style={{ display: 'flex', gap: '0.65rem' }}>
-                              <button
-                                onClick={handleAcceptAndUsePhoto}
-                                disabled={isProcessing}
-                                style={{
-                                  padding: '0.5rem 1.2rem',
-                                  borderRadius: '6px',
-                                  background: '#10b981',
-                                  color: '#ffffff',
-                                  border: 'none',
-                                  fontWeight: 700,
-                                  fontSize: '0.82rem',
-                                  cursor: isProcessing ? 'not-allowed' : 'pointer',
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  gap: '0.4rem'
-                                }}
-                              >
-                                <CheckCircle2 size={15} /> [ USE THIS PHOTO ]
-                              </button>
-                              <button
-                                onClick={handleRetake}
-                                style={{
-                                  padding: '0.5rem 0.9rem',
-                                  borderRadius: '6px',
-                                  background: 'rgba(255, 255, 255, 0.08)',
-                                  color: '#94a3b8',
-                                  border: '1px solid #475569',
-                                  fontWeight: 600,
-                                  fontSize: '0.82rem',
-                                  cursor: 'pointer'
-                                }}
-                              >
-                                [ RETAKE ]
-                              </button>
-                            </div>
-                          </div>
-                        ) : (
-                          <div>
-                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.4rem' }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', color: '#ef4444', fontWeight: 800, fontSize: '0.92rem' }}>
-                                <AlertTriangle size={18} />
-                                <span>⚠ PHOTO NOT SUITABLE</span>
-                              </div>
-                              <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#ef4444', background: 'rgba(239, 68, 68, 0.2)', padding: '0.2rem 0.55rem', borderRadius: '4px' }}>
-                                Score: {validationResult.score}/100
-                              </span>
-                            </div>
-
-                            <div style={{ marginBottom: '0.5rem', fontSize: '0.8rem', color: '#fca5a5' }}>
-                              {validationResult.reasons.map((r, i) => (
-                                <div key={i} style={{ marginBottom: '0.2rem' }}>• {r}</div>
-                              ))}
-                            </div>
-
-                            {validationResult.recommendations.length > 0 && (
-                              <div style={{ marginBottom: '0.75rem', fontSize: '0.78rem', color: '#cbd5e1' }}>
-                                <strong>Guidance:</strong> {validationResult.recommendations.join(' ')}
-                              </div>
-                            )}
-
-                            <button
-                              onClick={handleRetake}
-                              style={{
-                                padding: '0.5rem 1.1rem',
-                                borderRadius: '6px',
-                                background: '#ef4444',
-                                color: '#ffffff',
-                                border: 'none',
-                                fontWeight: 700,
-                                fontSize: '0.82rem',
-                                cursor: 'pointer',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '0.4rem'
-                              }}
-                            >
-                              <RotateCcw size={14} /> [ RETAKE ]
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    {/* Section 11: Circuit not clearly detected warning */}
+                    {/* Backend Detection Result Banner when 0 components found */}
                     {detectionConfidenceError && (
                       <div style={{
                         marginTop: '0.85rem',
@@ -1217,26 +1109,11 @@ export default function PhotoCircuitMapper({ onComplete = null }) {
                       }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', fontWeight: 700, marginBottom: '0.35rem', fontSize: '0.9rem' }}>
                           <AlertTriangle size={16} color="#eab308" />
-                          <span>⚠ CIRCUIT NOT CLEARLY DETECTED</span>
+                          <span>No supported electronic components detected.</span>
                         </div>
-                        <div style={{ fontSize: '0.8rem', marginBottom: '0.65rem', color: '#fde047' }}>
-                          {detectionConfidenceError}
+                        <div style={{ fontSize: '0.8rem', color: '#fde047' }}>
+                          The backend analyzed the image but found no recognizable circuit components.
                         </div>
-                        <button
-                          onClick={handleRetake}
-                          style={{
-                            padding: '0.45rem 1rem',
-                            borderRadius: '6px',
-                            background: '#eab308',
-                            color: '#0f172a',
-                            border: 'none',
-                            fontWeight: 700,
-                            fontSize: '0.8rem',
-                            cursor: 'pointer'
-                          }}
-                        >
-                          [ RETAKE ]
-                        </button>
                       </div>
                     )}
                   </div>
@@ -1494,6 +1371,7 @@ export default function PhotoCircuitMapper({ onComplete = null }) {
                           <th style={{ padding: '0.4rem 0.3rem' }}>Type</th>
                           <th style={{ padding: '0.4rem 0.3rem' }}>Value</th>
                           <th style={{ padding: '0.4rem 0.3rem' }}>Holes</th>
+                          <th style={{ padding: '0.4rem 0.3rem' }}>Confidence</th>
                           <th style={{ padding: '0.4rem 0.3rem' }}>Status</th>
                         </tr>
                       </thead>
@@ -1503,6 +1381,16 @@ export default function PhotoCircuitMapper({ onComplete = null }) {
                           const t2 = comp.terminals?.[1];
                           const isOk = comp.status === 'VERIFIED';
                           const isSelected = inspectedComp?.id === comp.id;
+
+                          const confVal = typeof comp.confidence === 'number' ? comp.confidence : 0.85;
+                          const confPct = Math.round(confVal > 1 ? confVal : confVal * 100);
+                          const confCat = comp.confidenceCategory || (comp.isUncertain || confVal < 0.45 ? 'UNCERTAIN' : (confVal >= 0.75 ? 'CONFIRMED' : 'PROBABLE'));
+
+                          const badgeStyle = confCat === 'CONFIRMED'
+                            ? { bg: 'rgba(34, 197, 94, 0.15)', color: '#4ade80', border: 'rgba(34, 197, 94, 0.3)' }
+                            : confCat === 'PROBABLE'
+                              ? { bg: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8', border: 'rgba(56, 189, 248, 0.3)' }
+                              : { bg: 'rgba(245, 158, 11, 0.15)', color: '#fbbf24', border: 'rgba(245, 158, 11, 0.3)' };
 
                           return (
                             <tr
@@ -1521,11 +1409,24 @@ export default function PhotoCircuitMapper({ onComplete = null }) {
                               <td style={{ padding: '0.4rem 0.3rem', color: '#cbd5e1', textTransform: 'capitalize' }}>
                                 {comp.type}
                               </td>
-                              <td style={{ padding: '0.4rem 0.3rem', color: '#facc15', fontWeight: 600 }}>
-                                {comp.displayValue || comp.formatted_value || `${comp.value || ''} ${comp.unit || ''}`}
+                              <td style={{ padding: '0.4rem 0.3rem', color: comp.isUncertain ? '#f59e0b' : '#facc15', fontWeight: 600 }}>
+                                {comp.isUncertain ? 'UNCERTAIN' : (comp.displayValue || comp.formatted_value || `${comp.value || ''} ${comp.unit || ''}`)}
                               </td>
                               <td style={{ padding: '0.4rem 0.3rem', color: '#38bdf8', fontFamily: 'monospace' }}>
                                 {comp.start_hole || t1?.hole || '?'} → {comp.end_hole || t2?.hole || '?'}
+                              </td>
+                              <td style={{ padding: '0.4rem 0.3rem' }}>
+                                <span style={{
+                                  padding: '0.12rem 0.45rem',
+                                  borderRadius: '4px',
+                                  fontSize: '0.64rem',
+                                  fontWeight: 800,
+                                  background: badgeStyle.bg,
+                                  color: badgeStyle.color,
+                                  border: `1px solid ${badgeStyle.border}`
+                                }}>
+                                  {confCat} ({confPct}%)
+                                </span>
                               </td>
                               <td style={{ padding: '0.4rem 0.3rem' }}>
                                 <span style={{
@@ -1537,7 +1438,7 @@ export default function PhotoCircuitMapper({ onComplete = null }) {
                                   color: isOk ? '#4ade80' : '#fbbf24',
                                   border: `1px solid ${isOk ? 'rgba(34, 197, 94, 0.3)' : 'rgba(245, 158, 11, 0.3)'}`
                                 }}>
-                                  {isOk ? '✓' : comp.status}
+                                  {isOk ? '✓ VERIFIED' : comp.status}
                                 </span>
                               </td>
                             </tr>

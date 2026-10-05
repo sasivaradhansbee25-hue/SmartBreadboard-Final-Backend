@@ -240,6 +240,10 @@ export function formatPipelineResultForCircuitContext(pipelineResult, originalIm
     const isVerified = Boolean(tA && tB && c.status !== 'UNVERIFIED' && c.status !== 'UNRESOLVED' && c.status !== 'UNKNOWN');
     const compStatus = isVerified ? (c.status || 'VERIFIED') : (c.status || 'UNVERIFIED');
 
+    const confVal = c.confidence || 0.95;
+    const isUncertain = c.is_uncertain || confVal < 0.45 || compStatus === 'UNVERIFIED';
+    const confCat = c.confidence_category || (isUncertain ? 'UNCERTAIN' : (confVal >= 0.75 ? 'CONFIRMED' : 'PROBABLE'));
+
     const bbox = c.bbox || c.boundingBox || [0, 0, 100, 100];
     const center = c.center || {
       x: Math.round(((bbox[0] || 0) + (bbox[2] || 0)) / 2),
@@ -261,12 +265,14 @@ export function formatPipelineResultForCircuitContext(pipelineResult, originalIm
       hole2: tB,
       node1: nA,
       node2: nB,
-      value: c.value !== undefined ? c.value : (c.nominal_value !== undefined ? c.nominal_value : (c.type === 'resistor' ? 220.0 : (c.type === 'inductor' ? 0.01 : (c.type === 'capacitor' ? 1e-5 : (c.type === 'led' ? 2.0 : (c.type === 'motor' ? 1.0 : 0.001)))))),
+      value: isUncertain ? 'UNCERTAIN' : (c.value !== undefined ? c.value : (c.nominal_value !== undefined ? c.nominal_value : (c.type === 'resistor' ? 220.0 : (c.type === 'inductor' ? 0.01 : (c.type === 'capacitor' ? 1e-5 : (c.type === 'led' ? 2.0 : (c.type === 'motor' ? 1.0 : 0.001))))))),
       unit: c.unit || (c.type === 'resistor' ? 'Ω' : (c.type === 'inductor' ? 'H' : (c.type === 'capacitor' ? 'F' : (c.type === 'led' ? 'V' : (c.type === 'motor' ? 'HP' : 'Ω'))))),
-      displayValue: c.displayValue || c.formatted_value || `${c.value ?? c.nominal_value ?? ''} ${c.unit || ''}`.trim(),
-      formatted_value: c.formatted_value || c.displayValue || `${c.value ?? c.nominal_value ?? ''} ${c.unit || ''}`.trim(),
+      displayValue: isUncertain ? 'UNCERTAIN' : (c.displayValue || c.formatted_value || `${c.value ?? c.nominal_value ?? ''} ${c.unit || ''}`.trim()),
+      formatted_value: isUncertain ? 'UNCERTAIN' : (c.formatted_value || c.displayValue || `${c.value ?? c.nominal_value ?? ''} ${c.unit || ''}`.trim()),
       status: compStatus,
-      confidence: c.confidence || 0.95,
+      confidence: confVal,
+      confidenceCategory: confCat,
+      isUncertain: isUncertain,
       bbox: bbox,
       boundingBox: bbox,
       center: center,

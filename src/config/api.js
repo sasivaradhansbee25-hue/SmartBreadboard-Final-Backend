@@ -3,7 +3,7 @@
 
 const metaEnv = typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env : {};
 
-export const DEFAULT_PRODUCTION_API_BASE_URL = 'https://smartbreadboard-api.onrender.com';
+export const DEFAULT_PRODUCTION_API_BASE_URL = 'https://smartbreadboard-final-backend.onrender.com';
 export const DEFAULT_PRODUCTION_FRONTEND_BASE_URL = 'https://smartbreadboard-3d.vercel.app';
 
 export function getHostname() {
